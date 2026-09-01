@@ -23,7 +23,7 @@ interface ConfigFile {
   customCloud?: AzureCloudEndpoints;
 }
 
-const DEFAULT_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"; // Azure CLI public client ID
+const DEFAULT_CLIENT_ID = ""; // Azure CLI public client ID
 
 export async function loadSettings(): Promise<LogicAppsMcpSettings> {
   // Try to load config file
