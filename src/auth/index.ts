@@ -15,4 +15,13 @@ export {
   logout,
   setPassthroughToken,
   clearPassthroughToken,
+  runWithToken,
 } from "./tokenManager.js";
+
+// Per-request service-principal credentials supplied as HTTP headers
+export {
+  readCredentialHeaders,
+  getTokenForCredentials,
+  clearTokenCache,
+} from "./credentialHeaders.js";
+export type { HeaderCredentials, HeaderBag } from "./credentialHeaders.js";

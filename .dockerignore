@@ -1,0 +1,11 @@
+# Do not add `knowledge` or `*.md` here - the knowledge tools read those
+# markdown files from /app/knowledge at runtime.
+.git
+.github
+.vscode
+node_modules
+dist
+coverage
+*.log
+.env
+.env.*

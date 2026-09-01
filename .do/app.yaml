@@ -1,0 +1,59 @@
+# DigitalOcean App Platform spec.
+#
+#   doctl apps create --spec .do/app.yaml
+#   doctl apps update <app-id> --spec .do/app.yaml
+#
+# No Azure credentials appear here by design. Callers supply their own service
+# principal on every request as X-Azure-Tenant-Id / X-Azure-Client-Id /
+# X-Azure-Client-Secret headers, so the deployment holds no standing access to
+# any tenant.
+#
+# MCP_SHARED_SECRET is the only secret the server itself holds. It gates /mcp
+# against anonymous traffic; it is not an authorization model.
+
+name: logicapps-mcp
+region: lon
+
+services:
+  - name: mcp
+    dockerfile_path: Dockerfile
+
+    github:
+      repo: CHANGE-ME/logicapps-mcp
+      branch: header-credentials
+      deploy_on_push: true
+
+    instance_size_slug: apps-s-1vcpu-1gb
+    instance_count: 1
+    http_port: 8080
+
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 20
+      period_seconds: 30
+      timeout_seconds: 5
+      failure_threshold: 3
+
+    envs:
+      # Gate for /mcp. Generate with: openssl rand -base64 32
+      # Set the real value in the App Platform UI or with `doctl apps update`,
+      # not in this file.
+      - key: MCP_SHARED_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: CHANGE-ME
+
+      # Keep at info. At debug, request headers (including the caller's client
+      # secret) can reach the run logs in plaintext.
+      - key: LOGICAPPS_MCP_LOG_LEVEL
+        scope: RUN_TIME
+        value: info
+
+      - key: LOGICAPPS_MCP_CACHE_TTL
+        scope: RUN_TIME
+        value: "300"
+
+      # Optional: lets tools omit the subscription argument.
+      - key: AZURE_SUBSCRIPTION_ID
+        scope: RUN_TIME
+        value: 887a0524-d4b3-48b1-8d18-7d179693e894

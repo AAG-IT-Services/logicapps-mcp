@@ -3,8 +3,13 @@
  * Creates an Express app that handles MCP requests over HTTP.
  *
  * Used by:
- * - Azure Functions (via function wrapper)
- * - Standalone HTTP server (for testing)
+ * - Standalone HTTP server (DigitalOcean App Platform, containers, local test)
+ * - Azure Functions uses its own entry point in ../functions/index.ts
+ *
+ * Request flow:
+ *   1. shared-secret gate  - rejects anonymous traffic before any work happens
+ *   2. credential resolve  - service-principal headers, or a bearer token
+ *   3. runWithToken        - binds the ARM token to this request's async context
  */
 
 import express, { Request, Response } from "express";
@@ -12,8 +17,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { registerToolsAndPrompts } from "../server.js";
 import { loadSettings } from "../config/index.js";
-import { setSettings, initializeAuth } from "../auth/index.js";
+import { setSettings, initializeAuth, runWithToken } from "../auth/index.js";
+import { readCredentialHeaders, getTokenForCredentials } from "../auth/credentialHeaders.js";
+import { checkSharedSecret, warnIfGateDisabled, SHARED_SECRET_HEADER } from "./sharedSecret.js";
 import { setCacheTtl } from "../tools/index.js";
+import { McpError } from "../utils/errors.js";
 import { VERSION } from "../version.js";
 
 let initialized = false;
@@ -45,37 +53,88 @@ function createMcpServer(): McpServer {
 }
 
 /**
+ * Send a JSON-RPC error response.
+ */
+function sendJsonRpcError(res: Response, status: number, code: number, message: string): void {
+  if (res.headersSent) return;
+  res.status(status).json({
+    jsonrpc: "2.0",
+    error: { code, message },
+    id: null,
+  });
+}
+
+/**
+ * Resolves the ARM token for this request.
+ *
+ * Service-principal headers take precedence; a bearer token in the
+ * Authorization header remains supported for callers who already hold one.
+ */
+async function resolveToken(req: Request): Promise<string> {
+  const creds = readCredentialHeaders(req.headers);
+  if (creds) {
+    return getTokenForCredentials(creds);
+  }
+
+  const bearerToken = req.headers.authorization?.replace(/^Bearer\s+/i, "").trim();
+  if (bearerToken) {
+    return bearerToken;
+  }
+
+  throw new McpError(
+    "AuthenticationError",
+    "Credentials required. Provide X-Azure-Tenant-Id, X-Azure-Client-Id and " +
+      "X-Azure-Client-Secret headers, or an Authorization header carrying an " +
+      "ARM-scoped bearer token."
+  );
+}
+
+/**
  * Handle MCP POST requests.
  * Creates a new stateless server for each request.
  */
 async function handleMcpPost(req: Request, res: Response): Promise<void> {
+  const gate = checkSharedSecret(req.headers);
+  if (!gate.allowed) {
+    console.error(`[security] rejected /mcp request (${gate.reason})`);
+    sendJsonRpcError(
+      res,
+      401,
+      -32001,
+      `Unauthorized. This server requires a valid ${SHARED_SECRET_HEADER} header.`
+    );
+    return;
+  }
+
+  let token: string;
   try {
     await ensureInitialized();
+    token = await resolveToken(req);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Authentication failed";
+    console.error("Auth error handling MCP request:", message);
+    sendJsonRpcError(res, 401, -32001, message);
+    return;
+  }
 
-    const mcpServer = createMcpServer();
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined, // Stateless mode
-    });
+  try {
+    await runWithToken(token, async () => {
+      const mcpServer = createMcpServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined, // Stateless mode
+      });
 
-    await mcpServer.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req, res, req.body);
 
-    res.on("close", () => {
-      transport.close();
-      mcpServer.close();
+      res.on("close", () => {
+        transport.close();
+        mcpServer.close();
+      });
     });
   } catch (error) {
     console.error("Error handling MCP request:", error);
-    if (!res.headersSent) {
-      res.status(500).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32603,
-          message: "Internal server error",
-        },
-        id: null,
-      });
-    }
+    sendJsonRpcError(res, 500, -32603, "Internal server error");
   }
 }
 
@@ -103,7 +162,7 @@ export function createMcpApp(): express.Application {
   // Parse JSON bodies
   app.use(express.json());
 
-  // Health check endpoint
+  // Health check endpoint - intentionally ungated so platform probes work
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", version: VERSION });
   });
@@ -117,10 +176,12 @@ export function createMcpApp(): express.Application {
 }
 
 /**
- * Start standalone HTTP server (for local testing).
+ * Start standalone HTTP server.
  */
 export async function startHttpServer(port: number = 3000): Promise<void> {
   const app = createMcpApp();
+
+  warnIfGateDisabled();
 
   app.listen(port, () => {
     console.log(`MCP HTTP Server listening on port ${port}`);
